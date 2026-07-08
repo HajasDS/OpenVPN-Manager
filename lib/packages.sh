@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+# =============================================================================
+# lib/packages.sh - package installation per package manager
+# =============================================================================
+
+pkg_refresh() {
+    log_info "Refreshing package metadata (${PKG_MANAGER})"
+    case "$PKG_MANAGER" in
+        apt)    DEBIAN_FRONTEND=noninteractive apt-get update -qq ;;
+        dnf)    dnf -q makecache --refresh >/dev/null 2>&1 || true ;;
+        yum)    yum -q makecache >/dev/null 2>&1 || true ;;
+        pacman) pacman -Sy --noconfirm >/dev/null ;;
+    esac
+}
+
+pkg_install() { # pkg_install pkg1 pkg2 ... (fails if any package fails)
+    log_info "Installing packages: $*"
+    case "$PKG_MANAGER" in
+        apt)    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "$@" ;;
+        dnf)    dnf install -y -q "$@" ;;
+        yum)    yum install -y -q "$@" ;;
+        pacman) pacman -S --noconfirm --needed "$@" ;;
+    esac
+}
+
+pkg_install_best_effort() { # install each package individually, ignore failures
+    local p
+    for p in "$@"; do
+        pkg_install "$p" >/dev/null 2>&1 || log_warn "Optional package not installed: $p"
+    done
+}
+
+pkg_remove() {
+    log_info "Removing packages: $*"
+    case "$PKG_MANAGER" in
+        apt)    DEBIAN_FRONTEND=noninteractive apt-get remove --purge -y -qq "$@" || true ;;
+        dnf)    dnf remove -y -q "$@" || true ;;
+        yum)    yum remove -y -q "$@" || true ;;
+        pacman) pacman -Rns --noconfirm "$@" || true ;;
+    esac
+}
+
+ensure_epel() {
+    # google-authenticator / pam_yubico live in EPEL on RHEL clones.
+    is_rhel_family || return 0
+    [[ "$OS_ID" == "fedora" ]] && return 0
+    if ! rpm -q epel-release >/dev/null 2>&1; then
+        log_info "Enabling EPEL repository"
+        pkg_install epel-release || log_warn "Could not install epel-release automatically."
+    fi
+}
+
+pkg_install_ui_tool() {
+    case "$PKG_MANAGER" in
+        apt)    pkg_refresh && pkg_install whiptail ;;
+        dnf|yum) pkg_install newt ;;
+        pacman) pkg_install libnewt ;;
+    esac
+}
+
+pkg_install_core() {
+    # openvpn + easy-rsa + tooling needed by every install
+    local -a pkgs
+    case "$PKG_MANAGER" in
+        apt)    pkgs=(openvpn easy-rsa openssl ca-certificates curl) ;;
+        dnf|yum) pkgs=(openvpn easy-rsa openssl ca-certificates curl) ;;
+        pacman) pkgs=(openvpn easy-rsa openssl ca-certificates curl) ;;
+    esac
+    pkg_install "${pkgs[@]}"
+    # iptables is only required for the raw-iptables firewall backend
+    command -v iptables >/dev/null 2>&1 || pkg_install_best_effort iptables
+}
+
+pkg_install_totp() {
+    ensure_epel
+    case "$PKG_MANAGER" in
+        apt)    pkg_install libpam-google-authenticator ;;
+        dnf|yum) pkg_install google-authenticator ;;
+        pacman) pkg_install libpam-google-authenticator ;;
+    esac
+    pkg_install_best_effort qrencode
+    find_pam_module pam_google_authenticator.so \
+        || die "pam_google_authenticator.so not found after installation."
+}
+
+pkg_install_yubico() {
+    ensure_epel
+    case "$PKG_MANAGER" in
+        apt)    pkg_install libpam-yubico ;;
+        dnf|yum) pkg_install pam_yubico ;;
+        pacman) pkg_install yubico-pam || pkg_install_best_effort yubico-pam ;;
+    esac
+    find_pam_module pam_yubico.so \
+        || die "pam_yubico.so not found after installation."
+}

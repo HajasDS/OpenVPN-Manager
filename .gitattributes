@@ -1,0 +1,5 @@
+# Shell scripts must keep LF endings even when checked out on Windows
+* text=auto
+*.sh text eol=lf
+*.md text eol=lf
+*.conf text eol=lf

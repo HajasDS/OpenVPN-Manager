@@ -1,0 +1,436 @@
+#!/usr/bin/env bash
+# =============================================================================
+# lib/openvpn.sh - installation wizard, server.conf / client template
+# generation, server settings changes, uninstall
+#
+# server.conf and the client template are ALWAYS regenerated from the
+# persisted configuration (single source of truth), so setting changes and
+# auth-mode changes cannot drift from each other.
+# =============================================================================
+
+readonly SYSCTL_FILE="/etc/sysctl.d/99-openvpn-manager.conf"
+
+openvpn_is_installed() {
+    [[ -f "$OVPN_SERVER_CONF" && -d "$PKI_DIR" ]]
+}
+
+# -----------------------------------------------------------------------------
+# Interactive installation wizard
+# -----------------------------------------------------------------------------
+
+install_wizard() {
+    if openvpn_is_installed; then
+        ui_yesno "Reinstall OpenVPN" \
+"OpenVPN is already installed by this tool.
+
+Reinstalling will DESTROY the current PKI: every existing user
+certificate and client profile will stop working permanently.
+
+A backup of /etc/openvpn will be created first.
+
+Continue with a full reinstall?" defaultno || return 0
+        ui_yesno "Are you absolutely sure?" \
+            "Last confirmation: wipe the PKI and reinstall OpenVPN?" defaultno || return 0
+        log_warn "Reinstall requested - existing configuration will be replaced"
+        _uninstall_core_quiet
+    fi
+
+    check_tun_device
+
+    # ---- Gather settings -----------------------------------------------------
+    local nic endpoint local_ip public_ip ipv6 port proto
+
+    nic="$(detect_default_nic)"
+    nic="$(ui_input_validated "Network interface" \
+        "Public network interface (used for NAT):" "${nic:-eth0}" \
+        _valid_nic "Interface not found on this system.")" || return 0
+
+    local_ip="$(detect_local_ipv4 "$nic")"
+    endpoint="$local_ip"
+    if [[ -z "$endpoint" ]] || is_private_ipv4 "$endpoint"; then
+        ui_info "Detecting public IP address..."
+        public_ip="$(detect_public_ipv4 || true)"
+        [[ -n "$public_ip" ]] && endpoint="$public_ip"
+    fi
+    endpoint="$(ui_input_validated "Public endpoint" \
+"IP address or DNS name clients will connect to.
+(Behind NAT? Enter the public IP / DNS name here.)" \
+        "$endpoint" is_valid_endpoint \
+        "Enter a valid IPv4/IPv6 address or DNS hostname.")" || return 0
+
+    ipv6="no"
+    if host_has_ipv6; then
+        ui_yesno "IPv6" "This host appears to have public IPv6 connectivity.
+
+Enable IPv6 inside the VPN tunnel as well?" \
+            && ipv6="yes"
+    fi
+
+    port="$(ui_input_validated "Port" "OpenVPN listening port:" "1194" \
+        is_valid_port "Port must be a number between 1 and 65535.")" || return 0
+
+    proto="$(ui_menu "Protocol" "Select the transport protocol:" \
+        "udp" "UDP - recommended (faster)" \
+        "tcp" "TCP - only if UDP is blocked (e.g. restrictive networks)")" || return 0
+
+    _choose_dns || return 0   # sets DNS1 DNS2 DNS_LABEL
+
+    ui_yesno "Confirm installation" \
+"Ready to install with these settings:
+
+  Endpoint:   ${endpoint}:${port}/${proto}
+  Interface:  ${nic}
+  VPN subnet: ${VPN_CIDR4}$( [[ $ipv6 == yes ]] && printf ' + %s' "$VPN_SUBNET6" )
+  DNS:        ${DNS_LABEL} (${DNS1}${DNS2:+, ${DNS2}})
+  Crypto:     ECDSA prime256v1, AES-256-GCM, tls-crypt, TLS >= 1.2
+  Auth mode:  certificate only (changeable later in the Authentication menu)
+
+Proceed?" || return 0
+
+    # ---- Persist settings, then build everything from them --------------------
+    ENDPOINT="$endpoint" PORT="$port" PROTOCOL="$proto"
+    IPV6_ENABLED="$ipv6" NIC="$nic" AUTH_MODE="cert"
+    config_set ENDPOINT "$ENDPOINT";     config_set PORT "$PORT"
+    config_set PROTOCOL "$PROTOCOL";     config_set IPV6_ENABLED "$IPV6_ENABLED"
+    config_set NIC "$NIC";               config_set AUTH_MODE "$AUTH_MODE"
+    config_set DNS1 "$DNS1"; config_set DNS2 "$DNS2"; config_set DNS_LABEL "$DNS_LABEL"
+    config_set TOTP_NULLOK "$TOTP_NULLOK"
+    config_set ENFORCE_CN_MATCH "$ENFORCE_CN_MATCH"
+
+    log_info "Installation started (endpoint=${ENDPOINT} port=${PORT}/${PROTOCOL} ipv6=${IPV6_ENABLED})"
+
+    ui_info "Installing packages (this may take a while)..."
+    pkg_refresh
+    pkg_install_core || die "Package installation failed (see $OVM_LOG_FILE)."
+
+    ui_info "Generating PKI and certificates (ECDSA prime256v1)..."
+    pki_init
+
+    ui_info "Writing server configuration..."
+    write_server_conf
+    write_client_template
+    write_sysctl
+
+    ui_info "Configuring firewall / NAT rules..."
+    firewall_apply
+
+    ui_info "Starting OpenVPN..."
+    mkdir -p /var/log/openvpn
+    systemctl daemon-reload
+    svc_enable
+    systemctl restart "$OVPN_SERVICE"
+    sleep 1
+
+    if svc_is_active; then
+        config_set INSTALLED "yes"; INSTALLED="yes"
+        log_info "Installation finished successfully"
+        ui_msg "Installation complete" \
+"OpenVPN is installed and running.
+
+  Firewall backend: ${FIREWALL_BACKEND}
+  Server config:    ${OVPN_SERVER_CONF}
+  Client profiles:  ${OVM_CLIENT_DIR}
+  Manager log:      ${OVM_LOG_FILE}
+
+Next step: add your first VPN user."
+        ui_yesno "Add user" "Add the first VPN user now?" && user_add
+    else
+        log_error "OpenVPN failed to start after installation"
+        ui_show_text "OpenVPN failed to start" \
+            "$(journalctl -u "$OVPN_SERVICE" --no-pager -n 30 2>/dev/null)"
+    fi
+}
+
+_valid_nic() { ip link show "$1" >/dev/null 2>&1; }
+
+_choose_dns() {
+    local choice
+    choice="$(ui_menu "DNS for VPN clients" "Resolver pushed to connected clients:" \
+        "cloudflare" "Cloudflare (1.1.1.1) - recommended" \
+        "google"     "Google (8.8.8.8)" \
+        "quad9"      "Quad9 (9.9.9.9) - malware blocking" \
+        "adguard"    "AdGuard DNS (94.140.14.14) - ad blocking" \
+        "opendns"    "OpenDNS (208.67.222.222)" \
+        "system"     "This server's own resolvers" \
+        "custom"     "Custom DNS servers")" || return 1
+    case "$choice" in
+        cloudflare) DNS1="1.1.1.1";        DNS2="1.0.0.1";           DNS_LABEL="Cloudflare" ;;
+        google)     DNS1="8.8.8.8";        DNS2="8.8.4.4";           DNS_LABEL="Google" ;;
+        quad9)      DNS1="9.9.9.9";        DNS2="149.112.112.112";   DNS_LABEL="Quad9" ;;
+        adguard)    DNS1="94.140.14.14";   DNS2="94.140.15.15";      DNS_LABEL="AdGuard" ;;
+        opendns)    DNS1="208.67.222.222"; DNS2="208.67.220.220";    DNS_LABEL="OpenDNS" ;;
+        system)
+            local resolv="/etc/resolv.conf"
+            [[ -f /run/systemd/resolve/resolv.conf ]] && resolv="/run/systemd/resolve/resolv.conf"
+            DNS1="$(awk '/^nameserver/ && $2 !~ /^127\./ {print $2; exit}' "$resolv")"
+            DNS2="$(awk '/^nameserver/ && $2 !~ /^127\./ {print $2}' "$resolv" | sed -n 2p)"
+            DNS_LABEL="system"
+            if [[ -z "$DNS1" ]]; then
+                ui_msg "DNS" "No usable system resolver found; falling back to Cloudflare."
+                DNS1="1.1.1.1"; DNS2="1.0.0.1"; DNS_LABEL="Cloudflare"
+            fi ;;
+        custom)
+            DNS1="$(ui_input_validated "Custom DNS" "Primary DNS server:" "" \
+                is_valid_dns_ip "Enter a valid IPv4 or IPv6 address.")" || return 1
+            DNS2="$(ui_input "Custom DNS" "Secondary DNS server (optional):" "")" || DNS2=""
+            if [[ -n "$DNS2" ]] && ! is_valid_dns_ip "$DNS2"; then
+                ui_msg "DNS" "Secondary DNS invalid - it will be skipped."
+                DNS2=""
+            fi
+            DNS_LABEL="custom" ;;
+    esac
+    return 0
+}
+
+# -----------------------------------------------------------------------------
+# Config generation (from persisted settings)
+# -----------------------------------------------------------------------------
+
+write_server_conf() {
+    backup_file "$OVPN_SERVER_CONF"
+
+    local listen_proto="$PROTOCOL"
+    [[ "$IPV6_ENABLED" == "yes" ]] && listen_proto="${PROTOCOL}6"
+
+    {
+        echo "# Generated by openvpn-manager v${OVM_VERSION} - do not edit manually."
+        echo "# Regenerated on every settings/auth change; edits will be lost."
+        echo "port ${PORT}"
+        echo "proto ${listen_proto}"
+        echo "dev tun"
+        echo
+        echo "user nobody"
+        echo "group ${NOGROUP}"
+        echo "persist-key"
+        echo "persist-tun"
+        echo "keepalive 10 120"
+        echo
+        echo "topology subnet"
+        echo "server ${VPN_SUBNET4} ${VPN_MASK4}"
+        echo "ifconfig-pool-persist ipp.txt"
+        if [[ "$IPV6_ENABLED" == "yes" ]]; then
+            echo "server-ipv6 ${VPN_SUBNET6}"
+            echo "push \"redirect-gateway def1 bypass-dhcp ipv6\""
+            echo "push \"route-ipv6 2000::/3\""
+        else
+            echo "push \"redirect-gateway def1 bypass-dhcp\""
+        fi
+        echo "push \"dhcp-option DNS ${DNS1}\""
+        [[ -n "$DNS2" ]] && echo "push \"dhcp-option DNS ${DNS2}\""
+        echo
+        echo "# --- TLS / crypto (modern-only) ---"
+        echo "ca ca.crt"
+        echo "cert ${SERVER_NAME}.crt"
+        echo "key ${SERVER_NAME}.key"
+        echo "dh none"
+        echo "ecdh-curve prime256v1"
+        echo "tls-crypt tls-crypt.key"
+        echo "crl-verify crl.pem"
+        echo "verify-client-cert require"
+        echo "auth SHA256"
+        echo "cipher AES-256-GCM"
+        echo "data-ciphers AES-256-GCM:AES-128-GCM:CHACHA20-POLY1305"
+        echo "tls-server"
+        echo "tls-version-min 1.2"
+        echo "tls-cipher TLS-ECDHE-ECDSA-WITH-AES-256-GCM-SHA384"
+        echo
+        auth_server_directives
+        echo
+        echo "status ${OVPN_STATUS_LOG}"
+        echo "verb 3"
+        [[ "$PROTOCOL" == "udp" ]] && echo "explicit-exit-notify 1"
+    } > "$OVPN_SERVER_CONF"
+    chmod 600 "$OVPN_SERVER_CONF"
+    log_info "server.conf regenerated (auth mode: ${AUTH_MODE})"
+}
+
+write_client_template() {
+    {
+        echo "client"
+        echo "proto ${PROTOCOL}"
+        echo "remote ${ENDPOINT} ${PORT}"
+        echo "dev tun"
+        echo "resolv-retry infinite"
+        echo "nobind"
+        echo "persist-key"
+        echo "persist-tun"
+        echo "remote-cert-tls server"
+        echo "verify-x509-name ${SERVER_NAME} name"
+        echo "auth SHA256"
+        echo "auth-nocache"
+        echo "cipher AES-256-GCM"
+        echo "data-ciphers AES-256-GCM:AES-128-GCM:CHACHA20-POLY1305"
+        echo "tls-client"
+        echo "tls-version-min 1.2"
+        echo "ignore-unknown-option block-outside-dns"
+        echo "setenv opt block-outside-dns  # Windows DNS-leak protection"
+        echo "verb 3"
+        [[ "$PROTOCOL" == "udp" ]] && echo "explicit-exit-notify"
+    } > "$OVM_TEMPLATE_FILE"
+    chmod 600 "$OVM_TEMPLATE_FILE"
+}
+
+write_sysctl() {
+    backup_file "$SYSCTL_FILE"
+    {
+        echo "# Generated by openvpn-manager"
+        echo "net.ipv4.ip_forward = 1"
+        [[ "$IPV6_ENABLED" == "yes" ]] && echo "net.ipv6.conf.all.forwarding = 1"
+    } > "$SYSCTL_FILE"
+    sysctl -p "$SYSCTL_FILE" >/dev/null
+}
+
+# -----------------------------------------------------------------------------
+# Settings changes (regenerate from config, reapply firewall, restart)
+# -----------------------------------------------------------------------------
+
+server_settings_menu() {
+    while true; do
+        local choice
+        choice="$(ui_menu "Server configuration" \
+"Current: ${ENDPOINT}:${PORT}/${PROTOCOL}  DNS: ${DNS_LABEL}  IPv6: ${IPV6_ENABLED}" \
+            "port"     "Change listening port (now: ${PORT})" \
+            "proto"    "Change protocol (now: ${PROTOCOL})" \
+            "dns"      "Change client DNS (now: ${DNS_LABEL})" \
+            "endpoint" "Change public endpoint (now: ${ENDPOINT})" \
+            "view"     "View current server.conf" \
+            "back"     "Back to main menu")" || return 0
+        case "$choice" in
+            port)
+                local new
+                new="$(ui_input_validated "Port" "New listening port:" "$PORT" \
+                    is_valid_port "Port must be 1-65535.")" || continue
+                [[ "$new" == "$PORT" ]] && continue
+                firewall_remove
+                PORT="$new"; config_set PORT "$PORT"
+                _regen_and_restart refresh_firewall regen_profiles ;;
+            proto)
+                local new
+                new="$(ui_menu "Protocol" "Select protocol:" \
+                    "udp" "UDP (recommended)" "tcp" "TCP")" || continue
+                [[ "$new" == "$PROTOCOL" ]] && continue
+                firewall_remove
+                PROTOCOL="$new"; config_set PROTOCOL "$PROTOCOL"
+                _regen_and_restart refresh_firewall regen_profiles ;;
+            dns)
+                _choose_dns || continue
+                config_set DNS1 "$DNS1"; config_set DNS2 "$DNS2"; config_set DNS_LABEL "$DNS_LABEL"
+                _regen_and_restart ;;
+            endpoint)
+                local new
+                new="$(ui_input_validated "Endpoint" "Public IP or DNS name for clients:" \
+                    "$ENDPOINT" is_valid_endpoint "Invalid address/hostname.")" || continue
+                ENDPOINT="$new"; config_set ENDPOINT "$ENDPOINT"
+                write_client_template
+                ui_msg "Endpoint changed" "The endpoint only affects client profiles."
+                _offer_regen_profiles ;;
+            view) ui_textfile "server.conf" "$OVPN_SERVER_CONF" ;;
+            back) return 0 ;;
+        esac
+    done
+}
+
+_regen_and_restart() { # args may include: refresh_firewall regen_profiles
+    write_server_conf
+    write_client_template
+    local a
+    for a in "$@"; do
+        [[ "$a" == "refresh_firewall" ]] && firewall_apply
+    done
+    svc_restart_checked || true
+    for a in "$@"; do
+        [[ "$a" == "regen_profiles" ]] && _offer_regen_profiles
+    done
+    log_info "Server settings updated (${ENDPOINT}:${PORT}/${PROTOCOL} dns=${DNS_LABEL})"
+}
+
+_offer_regen_profiles() {
+    ui_yesno "Client profiles" \
+"Connection settings changed. Existing .ovpn files still point to the
+old settings.
+
+Regenerate all client profiles now?" && user_regenerate_all_profiles
+}
+
+# -----------------------------------------------------------------------------
+# Uninstall
+# -----------------------------------------------------------------------------
+
+uninstall_wizard() {
+    openvpn_is_installed || { ui_msg "Uninstall" "OpenVPN does not appear to be installed."; return 0; }
+
+    ui_yesno "Uninstall OpenVPN" \
+"This will:
+  - stop and disable the OpenVPN service
+  - remove firewall/NAT rules added by this tool
+  - remove /etc/openvpn (PKI, certificates, keys)
+  - remove VPN system accounts (group ${VPN_GROUP})
+  - remove PAM/TOTP/YubiKey configuration created by this tool
+
+A full encrypted-permission backup archive will be saved to /root first,
+so the setup can be restored manually if needed.
+
+Existing system firewall configuration NOT created by this tool
+will not be touched. Continue?" defaultno || return 0
+
+    ui_yesno "Final confirmation" "Really uninstall OpenVPN now?" defaultno || return 0
+
+    local archive="/root/openvpn-manager-backup-${RUN_STAMP}.tar.gz"
+    ui_info "Creating backup archive..."
+    tar -czf "$archive" -C / etc/openvpn etc/openvpn-manager 2>/dev/null || true
+    chmod 600 "$archive"
+    log_info "Uninstall backup created: ${archive} (contains private keys - kept root-only)"
+
+    _uninstall_core_quiet
+
+    local purge="no"
+    if ui_yesno "Packages" "Also remove the installed packages (openvpn, easy-rsa, PAM modules)?" defaultno; then
+        purge="yes"
+        pkg_remove openvpn easy-rsa
+        pkg_remove libpam-google-authenticator google-authenticator \
+                   libpam-yubico pam_yubico 2>/dev/null || true
+    fi
+
+    config_set INSTALLED "no"; INSTALLED="no"
+    log_info "Uninstall finished (packages removed: ${purge})"
+    ui_msg "Uninstall complete" \
+"OpenVPN has been removed.
+
+Backup archive (contains private keys, keep it safe or delete it):
+  ${archive}
+
+Manager log kept at: ${OVM_LOG_FILE}"
+}
+
+_uninstall_core_quiet() {
+    # Shared by uninstall and reinstall. No prompts here.
+    systemctl stop "$OVPN_SERVICE"    >/dev/null 2>&1 || true
+    systemctl disable "$OVPN_SERVICE" >/dev/null 2>&1 || true
+
+    firewall_remove
+
+    rm -f "$SYSCTL_FILE"
+    sysctl --system >/dev/null 2>&1 || true
+
+    # Remove VPN system accounts we created (primary group = VPN_GROUP only).
+    if getent group "$VPN_GROUP" >/dev/null 2>&1; then
+        local gid u
+        gid="$(getent group "$VPN_GROUP" | cut -d: -f3)"
+        while IFS=: read -r u _ _ ugid _; do
+            if [[ "$ugid" == "$gid" ]]; then
+                userdel "$u" >/dev/null 2>&1 || true
+                log_info "Removed VPN system account: $u"
+            fi
+        done < /etc/passwd
+        groupdel "$VPN_GROUP" >/dev/null 2>&1 || true
+    fi
+
+    rm -f "$PAM_FILE"
+    rm -rf /etc/openvpn
+    rm -rf /var/log/openvpn
+    # Wipe secrets and client material managed by this tool
+    find "$OVM_TOTP_DIR" -type f -exec shred -u {} + 2>/dev/null || rm -rf "${OVM_TOTP_DIR:?}"/* 2>/dev/null || true
+    rm -rf "${OVM_CLIENT_DIR:?}"/* 2>/dev/null || true
+    rm -f "$OVM_YUBI_AUTHFILE" "$OVM_TEMPLATE_FILE"
+    log_info "Core OpenVPN configuration removed"
+}
