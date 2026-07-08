@@ -44,16 +44,31 @@ _ui_height() { # _ui_height "text" -> reasonable box height
     printf '%s' "$h"
 }
 
+_ui_display() { # _ui_display <cmd...>
+    # Run a DISPLAY-ONLY widget (msgbox/textbox/infobox/yesno) so it always
+    # draws on the real terminal. whiptail/dialog render their UI on stdout;
+    # when a helper is called inside $(...) command substitution, stdout is
+    # captured and the widget becomes an invisible box waiting for input
+    # forever. Redirect drawing to the controlling terminal in that case.
+    if [[ -t 1 ]]; then
+        "$@"
+    elif [[ -w /dev/tty ]]; then
+        "$@" > /dev/tty
+    else
+        "$@" >&2
+    fi
+}
+
 # --- Message / confirmation ---------------------------------------------------
 
 ui_msg() { # ui_msg "Title" "Text"
     local title="$1" text="$2"
     case "$UI_TOOL" in
         plain)
-            printf '\n== %s ==\n%s\n' "$title" "$text"
-            read -rp "[Enter to continue] " _ ;;
+            printf '\n== %s ==\n%s\n' "$title" "$text" >&2
+            read -rp "[Enter to continue] " _ || true ;;
         *)
-            "$UI_TOOL" --backtitle "$OVM_BACKTITLE" --title "$title" \
+            _ui_display "$UI_TOOL" --backtitle "$OVM_BACKTITLE" --title "$title" \
                 --msgbox "$text" "$(_ui_height "$text")" 74 ;;
     esac
 }
@@ -64,8 +79,8 @@ ui_yesno() { # ui_yesno "Title" "Question" [defaultno]
         plain)
             local ans def="y/N"
             [[ -z "$defno" ]] && def="Y/n"
-            printf '\n== %s ==\n%s\n' "$title" "$text"
-            read -rp "Confirm? [$def] " ans
+            printf '\n== %s ==\n%s\n' "$title" "$text" >&2
+            read -rp "Confirm? [$def] " ans || return 1
             if [[ -z "$ans" ]]; then
                 [[ -z "$defno" ]]
             else
@@ -74,7 +89,7 @@ ui_yesno() { # ui_yesno "Title" "Question" [defaultno]
         *)
             local -a flags=()
             [[ -n "$defno" ]] && flags+=(--defaultno)
-            "$UI_TOOL" --backtitle "$OVM_BACKTITLE" --title "$title" \
+            _ui_display "$UI_TOOL" --backtitle "$OVM_BACKTITLE" --title "$title" \
                 "${flags[@]}" --yesno "$text" "$(_ui_height "$text")" 74 ;;
     esac
 }
@@ -83,14 +98,14 @@ ui_info() { # non-blocking progress note
     local text="$1"
     case "$UI_TOOL" in
         plain)
-            printf '... %s\n' "$text" ;;
+            printf '... %s\n' "$text" >&2 ;;
         whiptail)
             # newt quirk: whiptail --infobox draws nothing on xterm-like
             # terminals unless TERM is downgraded for the call
-            TERM=ansi whiptail --backtitle "$OVM_BACKTITLE" --title "Working" \
-                --infobox "$text" 7 70 ;;
+            _ui_display env TERM=ansi whiptail --backtitle "$OVM_BACKTITLE" \
+                --title "Working" --infobox "$text" 7 70 ;;
         *)
-            "$UI_TOOL" --backtitle "$OVM_BACKTITLE" --title "Working" \
+            _ui_display "$UI_TOOL" --backtitle "$OVM_BACKTITLE" --title "Working" \
                 --infobox "$text" 7 70 ;;
     esac
 }
@@ -113,7 +128,7 @@ ui_run() { # ui_run "label" cmd [args...]
 }
 
 ui_pause() { # plain "press Enter" prompt (used after ui_run phases)
-    printf '\n%s' "${1:-Press Enter to continue...}"
+    printf '\n%s' "${1:-Press Enter to continue...}" >&2
     read -r _ || true
 }
 
@@ -136,7 +151,7 @@ ui_input() { # ui_input "Title" "Prompt" ["default"] -> stdout
         plain)
             local val
             printf '\n== %s ==\n' "$title" >&2
-            read -rp "$text [$def]: " val
+            read -rp "$text [$def]: " val || return 1   # EOF = cancel, never loop
             [[ -z "$val" ]] && val="$def"
             printf '%s' "$val" ;;
         *)
@@ -163,7 +178,7 @@ ui_password() { # ui_password "Title" "Prompt" -> stdout (input hidden)
         plain)
             local val
             printf '\n== %s ==\n' "$title" >&2
-            read -rsp "$text: " val
+            read -rsp "$text: " val || { printf '\n' >&2; return 1; }
             printf '\n' >&2
             printf '%s' "$val" ;;
         *)
@@ -226,11 +241,13 @@ ui_textfile() { # ui_textfile "Title" /path/to/file
     local title="$1" file="$2"
     case "$UI_TOOL" in
         plain)
-            printf '\n== %s ==\n' "$title"
-            cat -- "$file"
-            read -rp "[Enter to continue] " _ ;;
+            {
+                printf '\n== %s ==\n' "$title"
+                cat -- "$file"
+            } >&2
+            read -rp "[Enter to continue] " _ || true ;;
         *)
-            "$UI_TOOL" --backtitle "$OVM_BACKTITLE" --title "$title" \
+            _ui_display "$UI_TOOL" --backtitle "$OVM_BACKTITLE" --title "$title" \
                 --scrolltext --textbox "$file" 24 78 ;;
     esac
 }

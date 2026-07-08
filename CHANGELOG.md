@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.2.2 — 2026-07-08
+
+### Fixed
+- **The missing-requirements screen could be invisible — YubiKey registration appeared to hang.** whiptail/dialog draw message and text boxes on stdout; when a dialog was shown from inside `$(...)` command substitution (as in `require_feature`'s choice capture, or the "invalid input" popups inside `ui_input_validated`), the widget was rendered into the captured variable instead of the terminal and sat waiting for an OK nobody could see. Two-layer fix: display-only widgets (`ui_msg`, `ui_yesno`, `ui_textfile`, `ui_info`) now always draw on the controlling terminal (`/dev/tty`) when stdout is captured, and the requirements info screen is shown outside the capture entirely (only the fd-swap-safe menu runs inside `$(...)`). Registering a YubiKey before enabling/configuring YubiKey support now reliably shows what is missing (PAM module, validation service, global mode) with fix options instead of hanging.
+- Plain-mode prompts and pagers print to stderr and tolerate EOF, so no plain-mode path can block or corrupt captured values either.
+
 ## 1.2.1 — 2026-07-08
 
 ### Fixed

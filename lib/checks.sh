@@ -54,7 +54,11 @@ require_feature() { # require_feature <feature> <user|""> "<action label>" ; 0 =
             done
         fi
 
-        choice="$(_requirements_dialog "$label")" || {
+        # The info screen is shown OUTSIDE the command substitution below:
+        # only the menu (whose fd-swap is capture-safe) runs inside $(...),
+        # so no widget can ever end up drawn into a captured variable.
+        show_missing_requirements_dialog "$label"
+        choice="$(_requirements_fix_menu)" || {
             log_info "${label}: cancelled at requirements check"
             return 1
         }
@@ -302,10 +306,8 @@ Requirements not met:
     ui_show_text "Missing requirements" "$text"
 }
 
-_requirements_dialog() { # prints the chosen action id; rc=1 on cancel
-    local label="$1" r sev name desc fix act id seen
-    show_missing_requirements_dialog "$label"
-
+_requirements_fix_menu() { # prints the chosen action id; rc=1 on cancel
+    local r sev name desc fix act id seen
     local -a fix_ids=() items=()
     for r in "${REQ_FAILURES[@]}"; do
         IFS='|' read -r sev name desc fix act <<< "$r"
