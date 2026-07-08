@@ -20,7 +20,7 @@ umask 077
 OVM_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly OVM_ROOT
 
-for _mod in common os ui packages certs firewall service openvpn users auth totp yubikey; do
+for _mod in common os ui packages certs firewall service openvpn users auth totp yubikey checks; do
     # shellcheck source=/dev/null
     source "${OVM_ROOT}/lib/${_mod}.sh" \
         || { printf 'FATAL: cannot load lib/%s.sh\n' "${_mod}" >&2; exit 1; }
@@ -108,8 +108,15 @@ main_menu() {
     while true; do
         local choice
         if ! openvpn_is_installed; then
+            local not_installed_text="OpenVPN is not installed on this system yet."
+            local partial
+            if partial="$(openvpn_partial_state)"; then
+                not_installed_text="${partial}
+Choose Install to repair - remnants are backed up and replaced."
+                log_warn "Partial installation detected at startup"
+            fi
             choice="$(ui_menu "OpenVPN Manager" \
-                "OpenVPN is not installed on this system yet." \
+                "$not_installed_text" \
                 "install" "Install OpenVPN server (guided setup)" \
                 "logs"    "View manager log" \
                 "exit"    "Exit")" || exit 0
@@ -156,6 +163,7 @@ main() {
     detect_os
     init_dirs
     config_load
+    config_sanitize
     ui_init
 
     log_info "openvpn-manager v${OVM_VERSION} started on ${OS_NAME} (auth mode: ${AUTH_MODE})"

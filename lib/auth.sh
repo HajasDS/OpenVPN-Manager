@@ -89,35 +89,15 @@ Continue?" || return 0
 apply_auth_mode() { # apply_auth_mode <mode>
     local new="$1"
 
-    # --- prerequisites --------------------------------------------------------
+    # --- validate ALL prerequisites before touching anything -------------------
+    # (packages, PAM plugin, API credentials, enrollment coverage, permissions)
+    require_feature "mode_${new}" "" \
+        "Switch authentication mode to '$(auth_mode_label "$new")'" || return 1
+
     if [[ "$new" != "cert" ]]; then
-        if ! PLUGIN_PATH="$(find_auth_pam_plugin)"; then
-            ui_msg "Error" "openvpn-plugin-auth-pam.so not found. Is OpenVPN installed correctly?"
-            return 1
-        fi
-        config_set PLUGIN_PATH "$PLUGIN_PATH"
+        config_set PLUGIN_PATH "$PLUGIN_PATH"   # resolved during validation
         groupadd -f "$VPN_GROUP"
     fi
-    case "$new" in
-        password_totp)
-            if ! find_pam_module pam_google_authenticator.so; then
-                ui_run "Install TOTP PAM module (pam_google_authenticator)" pkg_install_totp \
-                    || { ui_resume_tui; ui_msg "Error" "Could not install the TOTP PAM module. See ${OVM_LOG_FILE}."; return 1; }
-            fi ;;
-        yubikey|password_yubikey)
-            if ! find_pam_module pam_yubico.so; then
-                ui_run "Install YubiKey PAM module (pam_yubico)" pkg_install_yubico \
-                    || { ui_resume_tui; ui_msg "Error" "Could not install the YubiKey PAM module. See ${OVM_LOG_FILE}."; return 1; }
-            fi
-            if [[ -z "$YUBICO_ID" && -z "$YUBICO_URL" ]]; then
-                ui_msg "YubiKey API required" \
-"YubiKey OTP validation needs either a YubiCloud API key
-(free at https://upgrade.yubico.com/getapikey/) or a self-hosted
-validation server URL. Configure it now."
-                yubikey_configure_api || return 1
-            fi ;;
-    esac
-    ui_resume_tui   # a package install above may have scrolled the screen
 
     # --- apply -----------------------------------------------------------------
     backup_file "$PAM_FILE"

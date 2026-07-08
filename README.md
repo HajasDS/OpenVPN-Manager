@@ -93,6 +93,7 @@ How it works under the hood (full detail in [docs/SECURITY.md](docs/SECURITY.md)
 - Password modes create a **locked-down system account** per user: no home, `nologin` shell, dedicated `openvpn-users` group; `pam_succeed_if` restricts VPN login to that group. Passwords are set via `chpasswd` (never on a command line) and stored only as hashes.
 - OpenVPN uses the standard `openvpn-plugin-auth-pam.so` plugin against a generated `/etc/pam.d/openvpn` stack. Multi-factor prompts are transported with OpenVPN's `static-challenge` (SCRV1) mechanism — requires OpenVPN ≥ 2.5 on both ends.
 - By default the username **must match the certificate CN** (`auth-user-pass-verify` check), so one user's certificate cannot be combined with another user's password.
+- Every authentication action **validates its prerequisites first** (packages, PAM plugin, API credentials, user/enrollment state, file permissions). Anything missing is shown with the reason and one-tap fix options instead of failing or hanging midway — see [docs/PREREQUISITES.md](docs/PREREQUISITES.md).
 
 ## TOTP setup guide
 

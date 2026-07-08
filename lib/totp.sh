@@ -58,11 +58,8 @@ invalidate the authenticator app entry they use today.
 Replace it?" defaultno || return 0
     fi
 
-    if ! find_pam_module pam_google_authenticator.so; then
-        ui_run "Install TOTP PAM module (pam_google_authenticator)" pkg_install_totp \
-            || { ui_resume_tui; ui_msg "Error" "Could not install the TOTP PAM module. See ${OVM_LOG_FILE}."; return 1; }
-        ui_resume_tui
-    fi
+    require_feature "totp_generate" "$user" \
+        "Generate a TOTP secret for user '${user}'" || return 0
 
     # 20 random bytes -> 32-char base32 secret (no padding), like RFC 4226 suggests
     secret="$(head -c 20 /dev/urandom | base32 | tr -d '=')"
@@ -189,6 +186,6 @@ _totp_display() { # _totp_display <user> <secret>
     echo " This is shown only now and is NOT logged anywhere."
     echo " At VPN login the user enters: password, then the 6-digit code."
     echo "==================================================================="
-    read -rp " Press Enter when the user has enrolled (screen will be cleared) " _
+    read -rp " Press Enter when the user has enrolled (screen will be cleared) " _ || true
     clear
 }

@@ -123,6 +123,32 @@ Each step lists the action and the **pass criteria**.
    - ✅ `sysctl net.ipv4.ip_forward` back to 0 (unless set elsewhere)
 2. Re-install afterwards. ✅ works on the same box.
 
+### 3.11 Dependency validation scenarios (v1.1.0)
+
+Each row: perform the action in the given broken state. **Pass criteria for every row:** no hang, no crash, no partial change; a "Missing requirements" screen lists the gaps with severity and reason; the fix menu offers the listed actions plus *Return to previous menu*; after cancelling, the previous menu is fully functional.
+
+| # | Scenario (state → action) | Expected requirements shown | Expected fix offers |
+|---|---|---|---|
+| 1 | Auth mode = cert → Register YubiKey for `alice` | global YubiKey mode disabled (warning); API unconfigured (warning) | configure API; proceed anyway; back |
+| 2 | No Yubico API configured → Register YubiKey | validation service (warning) | configure now |
+| 3 | `libpam-yubico` not installed → Register YubiKey | PAM module (blocking) | install package |
+| 4 | Fresh cert-only server → enable YubiKey mode | pam_yubico (blocking), API (blocking), no registered keys (warning) | install, configure, register |
+| 5 | Register YubiKey for non-existing user | user (blocking) — reachable only via fix-menu path; user pickers already exclude unknown names | back |
+| 6 | User already has a key → register same key again | "already registered" message; add-vs-replace menu for a different key | n/a |
+| 7 | `libpam-google-authenticator` missing → Generate TOTP | PAM module (blocking) | install package |
+| 8 | Mandatory TOTP, zero enrolled users → enable password+TOTP mode | enrollment coverage (warning) | generate secret now |
+| 9 | PAM plugin file removed → enable password mode | OpenVPN PAM plugin (blocking) | none (reinstall hint) |
+| 10 | Delete `pki/private/alice.key` → regenerate alice's profile | user cert/key (blocking) | back |
+| 11 | `systemctl disable --now openvpn-server@server; rm unit` → Service→restart | restart fails; journal shown; menu returns | n/a |
+| 12 | Delete `/etc/openvpn/server/server.conf` only → start tool | "Incomplete installation detected (found: PKI …)" on the install menu | Install = repair |
+| 13 | Kill installer mid-PKI-generation → restart tool | same partial-state banner; reinstall succeeds | n/a |
+| 14 | Truncate `/etc/openvpn-manager/config.conf` mid-file → start tool | starts normally; missing keys use defaults | n/a |
+| 15 | Corrupt values (`PORT=abc`, `AUTH_MODE=banana`, `YUBICO_URL=::`) → start tool | starts; log shows "Config sanitized … PORT AUTH_MODE YUBICO_URL"; menus show sane defaults | n/a |
+| 16 | `chmod 644` a TOTP secret + the PAM file → any auth action | permissions (warning) | tighten permissions now |
+| 17 | Run via `ssh host sudo ./openvpn-manager.sh < /dev/null` (no tty) | plain-text mode, EOF on prompts exits cleanly — no invisible-dialog hang | n/a |
+
+Also verify the audit log after 1–4: lines like `Switch authentication mode … blocked: YubiKey validation service (blocking)` and **no** secrets/OTP/API-key values anywhere in `/var/log/openvpn-manager.log`.
+
 ## 4. Regression quick-list
 
 After any code change, minimally re-run: 3.1(1), 3.2(1), 3.3, 3.5(2), 3.6(2), 3.10.

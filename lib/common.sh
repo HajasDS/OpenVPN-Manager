@@ -7,7 +7,7 @@
 # private keys or client profile contents. Log operational events only.
 # =============================================================================
 
-readonly OVM_VERSION="1.0.1"
+readonly OVM_VERSION="1.1.0"
 
 # --- Paths -------------------------------------------------------------------
 readonly OVM_ETC_DIR="/etc/openvpn-manager"
@@ -159,6 +159,38 @@ ENFORCE_CN_MATCH="yes"
 YUBICO_ID="" YUBICO_KEY="" YUBICO_URL=""
 FIREWALL_BACKEND=""
 PLUGIN_PATH=""
+
+config_sanitize() {
+    # Recover safely from a hand-edited, truncated or corrupted config file:
+    # every loaded value is re-validated and reset to a safe default if bad,
+    # so no code path ever operates on undefined/garbage settings.
+    local fixed=""
+    is_valid_port "$PORT" || { fixed+=" PORT"; PORT="1194"; }
+    [[ "$PROTOCOL" == "udp" || "$PROTOCOL" == "tcp" ]] || { fixed+=" PROTOCOL"; PROTOCOL="udp"; }
+    case "$AUTH_MODE" in
+        cert|password|password_totp|yubikey|password_yubikey) ;;
+        *) fixed+=" AUTH_MODE"; AUTH_MODE="cert" ;;
+    esac
+    [[ "$IPV6_ENABLED" == "yes" ]] || IPV6_ENABLED="no"
+    [[ "$TOTP_NULLOK" == "yes" ]] || TOTP_NULLOK="no"
+    [[ "$ENFORCE_CN_MATCH" == "no" ]] || ENFORCE_CN_MATCH="yes"
+    [[ "$INSTALLED" == "yes" ]] || INSTALLED="no"
+    if [[ -n "$ENDPOINT" ]] && ! is_valid_endpoint "$ENDPOINT"; then
+        fixed+=" ENDPOINT"; ENDPOINT=""
+    fi
+    if [[ -n "$YUBICO_ID" ]] && ! is_valid_yubico_client_id "$YUBICO_ID"; then
+        fixed+=" YUBICO_ID"; YUBICO_ID=""
+    fi
+    if [[ -n "$YUBICO_URL" ]] && ! is_valid_url "$YUBICO_URL"; then
+        fixed+=" YUBICO_URL"; YUBICO_URL=""
+    fi
+    case "$FIREWALL_BACKEND" in ""|firewalld|ufw|iptables) ;; *) fixed+=" FIREWALL_BACKEND"; FIREWALL_BACKEND="" ;; esac
+    if [[ -n "$PLUGIN_PATH" && ! -e "$PLUGIN_PATH" ]]; then
+        fixed+=" PLUGIN_PATH"; PLUGIN_PATH=""
+    fi
+    [[ -n "$fixed" ]] && log_warn "Config sanitized - invalid values were reset:${fixed}"
+    return 0
+}
 
 # =============================================================================
 # Backups

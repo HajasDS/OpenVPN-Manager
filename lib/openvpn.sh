@@ -14,6 +14,19 @@ openvpn_is_installed() {
     [[ -f "$OVPN_SERVER_CONF" && -d "$PKI_DIR" ]]
 }
 
+openvpn_partial_state() {
+    # Detects remnants of a failed/interrupted installation. Prints a short
+    # description and returns 0 if partial artifacts exist, 1 otherwise.
+    openvpn_is_installed && return 1
+    local bits=""
+    [[ -f "$OVPN_SERVER_CONF" ]] && bits+=" server.conf"
+    [[ -d "$PKI_DIR" ]] && bits+=" PKI"
+    [[ "$INSTALLED" == "yes" ]] && bits+=" config-says-installed"
+    systemctl is-enabled "$OVPN_SERVICE" >/dev/null 2>&1 && bits+=" service-unit"
+    [[ -n "$bits" ]] || return 1
+    printf 'Incomplete installation detected (found:%s).' "$bits"
+}
+
 # -----------------------------------------------------------------------------
 # Interactive installation wizard
 # -----------------------------------------------------------------------------

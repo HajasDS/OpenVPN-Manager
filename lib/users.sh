@@ -73,6 +73,10 @@ _is_vpn_account() { # true if the account's primary group is VPN_GROUP
 # -----------------------------------------------------------------------------
 
 user_add() {
+    # PKI must be healthy before we try to issue anything (covers partially
+    # installed / interrupted setups).
+    require_feature "user_add" "" "Add a new VPN user" || return 0
+
     local name
     name="$(ui_input_validated "New VPN user" \
         "Username (letters, digits, '-', '_'; max 32 chars):" "" \
@@ -324,9 +328,14 @@ build_client_profile() { # build_client_profile <name>
 user_regenerate_profile() {
     local name
     name="$(user_select "Regenerate profile")" || return 0
-    build_client_profile "$name" \
-        && ui_msg "Done" "Profile regenerated:
+    require_feature "profile" "$name" \
+        "Regenerate the client profile of '${name}'" || return 0
+    if build_client_profile "$name"; then
+        ui_msg "Done" "Profile regenerated:
 ${OVM_CLIENT_DIR}/${name}.ovpn"
+    else
+        ui_msg "Error" "Profile generation failed. See ${OVM_LOG_FILE}."
+    fi
 }
 
 user_regenerate_all_profiles() {

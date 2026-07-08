@@ -12,6 +12,13 @@ OVM_BACKTITLE=""
 
 ui_init() {
     OVM_BACKTITLE="OpenVPN Manager v${OVM_VERSION}  —  $(hostname)"
+    # No usable terminal (piped stdin/stdout, TERM=dumb)? whiptail/dialog
+    # would draw nothing and wait for input forever - use plain prompts.
+    if [[ ! -t 0 || ! -t 1 || "${TERM:-dumb}" == "dumb" ]]; then
+        UI_TOOL="plain"
+        log_info "UI backend: plain (no interactive terminal detected)"
+        return 0
+    fi
     if command -v whiptail >/dev/null 2>&1; then
         UI_TOOL="whiptail"
     elif command -v dialog >/dev/null 2>&1; then

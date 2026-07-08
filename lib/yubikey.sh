@@ -113,6 +113,12 @@ You will receive a numeric Client ID and a base64 Secret Key."
 yubikey_register() { # yubikey_register <user>
     local user="$1" otp pubid
 
+    # Validate everything (PAM module, API config, user, global mode) BEFORE
+    # asking for an OTP - missing prerequisites show a fix menu instead of
+    # failing or hanging midway.
+    require_feature "yubikey_register" "$user" \
+        "Register a YubiKey for user '${user}'" || return 0
+
     otp="$(ui_password "Register YubiKey" \
 "Insert ${user}'s YubiKey and touch it once.
 (The OTP appears as typed keystrokes; input is hidden.)")" || return 0
@@ -209,10 +215,7 @@ yubikey_list() {
 # -----------------------------------------------------------------------------
 
 yubikey_test() {
-    if [[ -z "$YUBICO_ID" && -z "$YUBICO_URL" ]]; then
-        ui_msg "Not configured" "Configure the validation service first."
-        return 0
-    fi
+    require_feature "yubikey_test" "" "Validate a test YubiKey OTP" || return 0
     local otp
     otp="$(ui_password "Test OTP" "Touch the YubiKey to emit a test OTP (input hidden)")" || return 0
     otp="${otp//[[:space:]]/}"
